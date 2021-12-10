@@ -122,3 +122,48 @@ class FWI:
 
         model_inverted = self.init_model.detach().cpu().numpy()
         return loss_list, model_inverted
+
+
+def smoothing(model, h=10, w=10, mode='gaussian', sigma=0.01):
+    """
+    Smoothing the standard model to create initial model
+    using average pooling
+
+    Parameters:
+    -----------
+    h: int
+        Hight of box for average pooling
+    w: int
+        Width of box for average pooling
+
+    Returns:
+    --------
+    torch.Tensor with the same shape as `model`
+        Model used as initial guess in FWi
+    """
+    # pading with edge values
+    padding_left = (w - 1) // 2
+    padding_right = w - 1 - padding_left
+    padding_top = (h - 1) // 2
+    padding_bottom = h - 1 - padding_top
+    m = torch.nn.ReplicationPad2d((padding_left, padding_right, 
+                                    padding_top, padding_bottom))
+    init = model.unsqueeze(0).unsqueeze(0)
+    init = m(init)
+    
+    # kernel
+    if mode == 'mean':
+        kernel = torch.ones(h, w) / (h*w)
+    elif mode == 'gaussian':
+        x = torch.arange(w)
+        y = torch.arange(h)
+        x = -(x - (w-1)/2)**2 / sigma**2
+        y = -(y - (h-1)/2)**2 / sigma**2
+        kernel = torch.exp(x.reshape(1, -1) + y.reshape(-1, 1))
+    else:
+        raise NotImplementedError("Not implemented till now!")
+        
+    kernel = kernel.unsqueeze(0).unsqueeze(0)
+    init = torch.nn.functional.conv2d(init, kernel).squeeze()
+    assert init.shape == model.shape 
+    return init
