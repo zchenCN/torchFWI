@@ -71,7 +71,7 @@ class FWI:
         super.__init__()
         self.device = 'cuda' if torch.cuda.is_available else 'cpu'
         self.true_model = torch.tensor(true_model).float().to(self.device)
-        self.init_model = torch.tensor(init_model, requires_grad=True).float().to(self.device)
+        # self.init_model = torch.tensor(init_model, requires_grad=True).float().to(self.device)
         self.sources_x = sources_x
         self.receivers_x = receivers_x
         self.h = h 
@@ -79,6 +79,8 @@ class FWI:
         self.dt = dt
         self.ts = torch.arange(nt) * dt
         self.source_time = ricker(self.ts, f0)
+        self.create_dataset()
+        
 
     def create_dataset(self):
         signal = gen_data(self.true_model, self.source_time, 
@@ -86,31 +88,46 @@ class FWI:
         
         self.dataset = SeisData(signal, self.sources_x, self.receivers_x)
 
-    def train(self, lr, weight_tv, weight_decay=0., batch_size=2, 
-                max_niters=50, tolerance=1e-3, print_interval=10):
-        self.create_dataset()
+    def compute_loss(self, syn, obs, f0):
+        obs = obs.permute(1, 0, 2)
+        obs = obs.flatten(start_dim=1)
+        obs = obs.T
+        syn = syn.flatten(start_dim=1)
+        syn = syn.T 
+        # Low pass filter
+        F_obs = torch.fft.rfft(obs, dim=1)
+        freq = torch.fft.rfftfreq(self.nt, self.dt)
+        F_obs = torch.where(freq>f0, 0, F_obs)
+        obs = torch.fft.irfft(F_obs)
+        F_syn = torch.fft.rfft(syn, dim=1)
+        F_syn = torch.where(freq>f0, 0, F_syn)
+        syn = torch.fft.irfft(F_syn)
+        loss = torch.mean(torch.square(obs - syn))
+        return loss 
+
+
+    def train(self, init_model, lr, f0, batch_size=2, 
+                max_niters=50, print_interval=10):
         loss_list = list()
         niters = 0
         time_begin = time.time()
         print("Training begin")
         dataloader = DataLoader(self.dataset, batch_size=batch_size, shuffle=True)
-        updater = torch.optim.Adam([self.init_model], lr=lr, weight_decay=weight_decay)
-        mse = nn.MSELoss()
-        tv = TVLoss(weight_tv)
+        updater = torch.optim.Adam(init_model, lr=lr)
         while niters < max_niters:
             for i, data in enumerate(dataloader):
                 sx, obs = data 
                 updater.zero_grad()
                 syn =  gen_data(self.init_model, acoustic2d, self.source_time, 
                         sx, self.h, self.dt, self.receivers_x)
-                loss = mse(syn, obs.permute(1, 0, 2)) + tv(self.init_model)
+                loss = self.compute_loss(syn, obs, f0)
                 loss.backward()
                 updater.step()            
-
+                
             with torch.no_grad():
                 syn = gen_data(self.init_model, self.source_time, 
                     self.sources_x, self.h, self.dt, self.receivers_x)
-                loss = mse(syn, self.dataset.signal).item()
+                loss = torch.mean(torch.square(syn - self.dataset.signal)).item()
                 loss_list.append(loss)
 
                 if (niters + 1) % print_interval == 0:
@@ -118,7 +135,7 @@ class FWI:
 
             niters += 1
         time_end = time.time()
-        print(f"Training finished, total time{time_begin-time_begin:.1f}s")
+        print(f"Training finished, total time{time_begin-time_end:.1f}s")
 
         model_inverted = self.init_model.detach().cpu().numpy()
         return loss_list, model_inverted
